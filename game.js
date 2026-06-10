@@ -109,6 +109,7 @@ function sfx(kind){
     lvl:   ()=>[523,659,784,1047,1319].forEach((f,i)=>tone(f,t+i*.07,.1,'square',.05)),
     run:   ()=>{tone(900,t,.05,'square',.04); tone(700,t+.06,.05,'square',.04);},
     money: ()=>{tone(988,t,.07,'square',.05); tone(1319,t+.08,.14,'square',.05);},
+    alert: ()=>{tone(740,t,.08,'square',.06); tone(740,t+.1,.22,'square',.06);},
   })[kind]?.();
 }
 
@@ -119,8 +120,8 @@ function say(text){
   return new Promise(async res=>{
     dialog.active=true; dialog.text=text; dialog.shown=0; dialog.res=res;
     while(dialog.active && dialog.shown < dialog.text.length){
-      // A를 누르고 있으면 글자가 빨리 나온다
-      dialog.shown = Math.min(dialog.text.length, dialog.shown + (keys.A?3:1));
+      // A/B를 누르고 있으면 글자가 빨리 나온다
+      dialog.shown = Math.min(dialog.text.length, dialog.shown + ((keys.A||keys.B)?3:1));
       await frame();
     }
   });
@@ -233,6 +234,7 @@ function setMap(id,x,y,dir){
   game.trail=[{x,y},{x,y}];
   banner.text = MAPS[id].name; banner.t = 2.2;
   fade.t = 1;   // 맵 전환 페이드 인
+  if(MAPS[id].music !== audio.want) playSong(MAPS[id].music);  // 지역별 BGM 전환
 }
 let bumpCool = 0, turnCool = 0, npcIdleT = 2;
 function updateWorld(dt){
@@ -258,7 +260,7 @@ function updateWorld(dt){
   for(const dir of ['up','down','left','right']){
     if(!keys[dir]) continue;
     // 다른 방향을 누르면 한 박자 제자리 회전 (짧게 누르면 방향만 바꾼다)
-    if(game.dir !== dir){ game.dir = dir; turnCool = .09; break; }
+    if(game.dir !== dir){ game.dir = dir; turnCool = .13; break; }
     if(turnCool>0) break;
     const d = {up:[0,-1],down:[0,1],left:[-1,0],right:[1,0]}[dir];
     const nx=game.px+d[0], ny=game.py+d[1];
@@ -305,7 +307,7 @@ async function checkSight(){
     if(!hit) continue;
     game.lock = true;
     alert_.x=tr.x; alert_.y=tr.y; alert_.t=.7;
-    sfx('sel');
+    sfx('alert');
     // 플레이어가 트레이너를 바라보게
     game.dir = {up:'down',down:'up',left:'right',right:'left'}[tr.dir];
     await wait(700);
@@ -417,13 +419,14 @@ async function pcFlow(){
 }
 
 /* ================= 필드 메뉴 ================= */
-let menuBusy = false;
+let menuBusy = false, menuIdx = 0;
 async function fieldMenu(){
   if(menuBusy || !game.flags.starter) return;
   menuBusy = true;
   try{
     while(true){
-      const c = await choose(['도감','포켓몬','가방','리포트','옵션','닫기'],{x:VW-112,y:8,w:104});
+      const c = await choose(['도감','포켓몬','가방','리포트','옵션','닫기'],{x:VW-112,y:8,w:104,idx:menuIdx});
+      if(c>=0 && c<5) menuIdx = c;   // 커서 위치 기억
       if(c<0 || c===5) break;
       if(c===0) await dexScreen();
       if(c===1) await partyScreen();
@@ -541,9 +544,11 @@ async function battleLoop(){
   while(battle.on){
     const c = await choose(['싸운다','가방','포켓몬','도망간다'],
       {cols:2, tag:'battle-main', cancel:false, prompt:`${josa(activeMon().name,'은는')} 무엇을 할까?`});
-    if(c===0){ // 싸운다
-      const mv = await choose(activeMon().moves, {tag:'battle-moves'});
+    if(c===0){ // 싸운다 — 마지막에 쓴 기술 위치를 기억한다
+      const idx = Math.min(battle.lastMv||0, activeMon().moves.length-1);
+      const mv = await choose(activeMon().moves, {tag:'battle-moves', idx});
       if(mv<0) continue;
+      battle.lastMv = mv;
       await turn({move:mv});
     }
     else if(c===1){ // 가방
@@ -901,8 +906,7 @@ async function newGame(){
   await say('박사: 너의 이름은… 그래, 「노랑」이구나!');
   await say('박사: 너만의 몬스터와 함께하는 모험이\n지금 시작된다! 연구소에서 기다리마!');
   mode='world';
-  setMap('town',13,6,'down');
-  playSong('field');
+  setMap('town',13,6,'down');   // setMap이 지역 BGM도 켠다
 }
 
 /* ================= 렌더링 ================= */
@@ -1337,5 +1341,5 @@ requestAnimationFrame(loop);
 setInterval(()=>{ if(performance.now()-last>200) loop(performance.now()); }, 100);
 
 /* 디버그 핸들 */
-window.DBG = {game, battle, dialog, get chooser(){return chooser;}, get mode(){return mode;}, set mode(v){mode=v;},
+window.DBG = {game, battle, dialog, keys, get chooser(){return chooser;}, get mode(){return mode;}, set mode(v){mode=v;},
   makeMon, startBattle, setMap, saveGame, loadGame, newGame, handleKey, evolveScene, MAPS, DEX, audio};
