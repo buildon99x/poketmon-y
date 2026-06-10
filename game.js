@@ -119,7 +119,9 @@ function say(text){
   return new Promise(async res=>{
     dialog.active=true; dialog.text=text; dialog.shown=0; dialog.res=res;
     while(dialog.active && dialog.shown < dialog.text.length){
-      dialog.shown++; await frame();
+      // A를 누르고 있으면 글자가 빨리 나온다
+      dialog.shown = Math.min(dialog.text.length, dialog.shown + (keys.A?3:1));
+      await frame();
     }
   });
 }
@@ -482,7 +484,7 @@ async function bagScreen(){
 const battle = {
   on:false, enemy:null, trainer:null, trIdx:0, meIdx:0,
   dispE:0, dispP:0, dispExp:0, shakeE:0, shakeP:0, lungeP:0, lungeE:0, flash:0,
-  faintE:0, faintP:0,
+  faintE:0, faintP:0, introT:1,
   evolveQueue:[], trans:0,
 };
 const activeMon = ()=>game.party[battle.meIdx];
@@ -507,7 +509,7 @@ async function startBattle(opts){
   battle.meIdx = Math.max(0, game.party.findIndex(m=>m.hp>0));
   battle.enemy = tr ? makeMon(tr.party[0][0], tr.party[0][1]) : opts.wild;
   battle.flash=1; battle.trans=0;
-  battle.faintE=0; battle.faintP=0;
+  battle.faintE=0; battle.faintP=0; battle.introT=0;
   battle.evolveQueue=[];
   dexSee(battle.enemy.name);
   battle.dispE = battle.enemy.hp/battle.enemy.maxhp;
@@ -551,9 +553,11 @@ async function battleLoop(){
       if(game.party[p].hp<=0){ await say('쓰러져 있어서 싸울 수 없다!'); continue; }
       await turn({switch:p});
     }
-    else { // 도망
+    else { // 도망 — 내 몬스터가 빠르면 반드시 성공
       if(battle.trainer){ await say('트레이너 승부에서 도망칠 수는 없다!'); continue; }
-      if(Math.random()<0.75){ sfx('run'); await say('무사히 도망쳤다!'); return endBattle(); }
+      const mySpd = statOf(DEX[activeMon().name].spd, activeMon().lvl);
+      const enSpd = statOf(DEX[battle.enemy.name].spd, battle.enemy.lvl);
+      if(mySpd>=enSpd || Math.random()<0.6){ sfx('run'); await say('무사히 도망쳤다!'); return endBattle(); }
       await say('도망칠 수 없었다!');
       await turn({pass:true});
     }
@@ -610,7 +614,16 @@ async function turn(act){
 }
 async function enemyAttack(){
   const en = battle.enemy, me = activeMon();
-  const mv = en.moves[rnd(en.moves.length)];
+  let mv;
+  if(battle.trainer && Math.random()<0.6){
+    // 트레이너는 상성·위력이 좋은 기술을 고른다
+    const score = m => MOVES[m].power
+      * typeMul(MOVES[m].type, DEX[me.name].type)
+      * (MOVES[m].type===DEX[en.name].type ? 1.5 : 1);
+    mv = en.moves.reduce((b,m)=>score(m)>score(b)?m:b, en.moves[0]);
+  } else {
+    mv = en.moves[rnd(en.moves.length)];
+  }
   await doMove(en,me,mv,false);
 }
 async function doMove(user,target,move,isPlayer){
@@ -776,7 +789,17 @@ async function evolveScene(mn){
   evolve.mon=mn; evolve.from=mn.name; evolve.to=ev.to; evolve.t=0;
   await say(`엇!? ${mn.name}의 모습이…!`);
   const t0 = performance.now();
-  while(performance.now()-t0 < 2600){ evolve.t=(performance.now()-t0)/2600; await frame(); }
+  let bReleased = !keys.B;   // 직전 대사를 닫은 B 홀드는 무시
+  while(performance.now()-t0 < 2600){
+    if(!keys.B) bReleased = true;
+    if(bReleased && keys.B){  // B로 진화 취소 (다음 레벨 업 때 다시 시도)
+      evolve.t = 0;
+      mode='world';
+      await say(`어라!? ${josa(mn.name,'이가')} 진화를 멈췄다!`);
+      return;
+    }
+    evolve.t=(performance.now()-t0)/2600; await frame();
+  }
   const oldName = mn.name, ratio = mn.hp/mn.maxhp;
   mn.name = ev.to;
   mn.maxhp = maxHpOf(DEX[mn.name].hp, mn.lvl);
@@ -1025,11 +1048,14 @@ function drawBattle(){
   ctx.fillStyle='#f0f8e8'; ctx.fillRect(0,0,VW,VH);
   ctx.fillStyle='#d8e8c8'; ctx.fillRect(0,170,VW,36);
   const en = battle.enemy, me = activeMon();
+  // 배틀 시작 시 양쪽에서 미끄러져 들어오는 등장 연출
+  const intro = 1-Math.pow(1-battle.introT,3);
+  const slideE = (1-intro)*140, slideP = (1-intro)*-160;
   if(en){
     // 적
     const shE = battle.shakeE>0?Math.sin(battle.shakeE*40)*3:0;
     const lgE = battle.lungeE>0?Math.sin(battle.lungeE*Math.PI)*-8:0;
-    ctx.fillStyle='#c8d8b0'; ctx.beginPath(); ctx.ellipse(232,108,46,12,0,0,7); ctx.fill();
+    ctx.fillStyle='#c8d8b0'; ctx.beginPath(); ctx.ellipse(232+slideE,108,46,12,0,0,7); ctx.fill();
     if(battle.ballAnim){
       // 포획 중: 몬스터볼이 흔들린다
       const ang = Math.sin(clock*22)*battle.ballAnim.rock*0.5;
@@ -1042,7 +1068,7 @@ function drawBattle(){
       ctx.restore();
     } else if(battle.faintE<1){
       ctx.save(); ctx.globalAlpha = 1-battle.faintE;
-      ctx.drawImage(SPR[en.name],0,0,16,16, 200+shE+lgE, 48+battle.faintE*32, 64,64);
+      ctx.drawImage(SPR[en.name],0,0,16,16, 200+shE+lgE+slideE, 48+battle.faintE*32, 64,64);
       ctx.restore();
     }
     panel(12,12,148,46);
@@ -1056,10 +1082,10 @@ function drawBattle(){
     // 아군
     const shP = battle.shakeP>0?Math.sin(battle.shakeP*40)*3:0;
     const lgP = battle.lungeP>0?Math.sin(battle.lungeP*Math.PI)*8:0;
-    ctx.fillStyle='#c8d8b0'; ctx.beginPath(); ctx.ellipse(80,196,50,12,0,0,7); ctx.fill();
+    ctx.fillStyle='#c8d8b0'; ctx.beginPath(); ctx.ellipse(80+slideP,196,50,12,0,0,7); ctx.fill();
     if(battle.faintP<1){
       ctx.save(); ctx.globalAlpha = 1-battle.faintP;
-      ctx.translate(116+shP+lgP,128+battle.faintP*32); ctx.scale(-1,1);
+      ctx.translate(116+shP+lgP+slideP,128+battle.faintP*32); ctx.scale(-1,1);
       ctx.drawImage(SPR[me.name],0,0,16,16,-36,0,72,72);
       ctx.restore();
     }
@@ -1238,6 +1264,7 @@ function loop(now){
   battle.lungeE = Math.max(0,battle.lungeE-dt*4);
   battle.lungeP = Math.max(0,battle.lungeP-dt*4);
   battle.flash = Math.max(0,battle.flash-dt*2);
+  if(battle.on) battle.introT = Math.min(1,battle.introT+dt*2.2);
   if(battle.ballAnim) battle.ballAnim.rock = Math.max(0,battle.ballAnim.rock-dt*2.2);
   healFx.t = Math.max(0,healFx.t-dt*1.2);
   // HP/EXP 바 애니메이션
