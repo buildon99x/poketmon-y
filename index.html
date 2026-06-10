@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>포켓 몬스터즈 Y — 옐로 어드벤처</title>
+<style>
+  html,body{margin:0;min-height:100%;background:#1a1c2c;display:flex;align-items:center;justify-content:center;flex-direction:column;font-family:sans-serif;-webkit-user-select:none;user-select:none;}
+  body{padding:12px 0 24px;}
+  #shell{background:#f4d738;border-radius:18px 18px 60px 18px;padding:26px 26px 40px;box-shadow:0 10px 40px rgba(0,0,0,.6), inset 0 -6px 0 #c9ac1b;max-width:96vw;box-sizing:border-box;}
+  #screenFrame{background:#5a5a6e;border-radius:10px;padding:18px 18px 14px;}
+  canvas{display:block;width:640px;max-width:calc(96vw - 88px);height:auto;aspect-ratio:320/288;image-rendering:pixelated;background:#9bbc0f;border-radius:4px;}
+  #label{color:#7a5c00;font-weight:bold;font-style:italic;text-align:center;margin-top:12px;letter-spacing:2px;}
+  #help{color:#8a8da8;font-size:13px;margin-top:14px;text-align:center;line-height:1.7;}
+  kbd{background:#2e3150;color:#dfe3ff;border-radius:4px;padding:1px 7px;font-size:12px;}
+  /* 터치 컨트롤 */
+  #pad{display:none;width:100%;max-width:480px;margin-top:10px;justify-content:space-between;align-items:center;padding:0 18px;box-sizing:border-box;}
+  @media (pointer:coarse){ #pad{display:flex;} #help{display:none;} }
+  .dpad{display:grid;grid-template-columns:repeat(3,52px);grid-template-rows:repeat(3,52px);}
+  .dpad button, .ab button{background:#2e3150;color:#dfe3ff;border:none;border-radius:10px;font-size:20px;font-weight:bold;touch-action:none;box-shadow:0 3px 0 #14162a;}
+  .dpad button:active, .ab button:active{transform:translateY(2px);box-shadow:none;}
+  .dpad .u{grid-area:1/2}.dpad .l{grid-area:2/1}.dpad .r{grid-area:2/3}.dpad .d{grid-area:3/2}
+  .ab{display:flex;gap:14px;align-items:flex-end;}
+  .ab button{width:62px;height:62px;border-radius:50%;font-size:18px;}
+  .ab .b{margin-bottom:26px;}
+</style>
+</head>
+<body>
+<div id="shell">
+  <div id="screenFrame"><canvas id="game" width="320" height="288"></canvas></div>
+  <div id="label">POCKET MONSTERS Y</div>
+</div>
+<div id="pad">
+  <div class="dpad">
+    <button class="u" data-k="up">▲</button>
+    <button class="l" data-k="left">◀</button>
+    <button class="r" data-k="right">▶</button>
+    <button class="d" data-k="down">▼</button>
+  </div>
+  <div class="ab">
+    <button class="b" data-k="B">B</button>
+    <button class="a" data-k="A">A</button>
+  </div>
+</div>
+<div id="help">
+  이동 <kbd>←↑↓→</kbd>/<kbd>WASD</kbd> &nbsp; 결정 <kbd>Z</kbd>/<kbd>Enter</kbd> &nbsp; 취소·메뉴 <kbd>X</kbd> &nbsp; 소리 <kbd>M</kbd><br>
+  풀숲에선 야생 몬스터가, 트레이너의 시야에 들어가면 승부가 시작됩니다!
+</div>
+<script src="data.js"></script>
+<script src="game.js"></script>
+</body>
+</html>
