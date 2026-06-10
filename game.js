@@ -225,14 +225,17 @@ function canWalk(x,y){
   return true;
 }
 const banner = {text:'', t:0};
+const fade = {t:0};
 function setMap(id,x,y,dir){
   game.map=id; game.px=x; game.py=y; game.dir=dir||game.dir;
   game.trail=[{x,y},{x,y}];
   banner.text = MAPS[id].name; banner.t = 2.2;
+  fade.t = 1;   // 맵 전환 페이드 인
 }
-let bumpCool = 0;
+let bumpCool = 0, turnCool = 0;
 function updateWorld(dt){
   bumpCool = Math.max(0,bumpCool-dt);
+  turnCool = Math.max(0,turnCool-dt);
   if(dialog.active || chooser.active || game.lock) return;
   if(game.moving){
     game.prog += dt*5.5;
@@ -245,7 +248,9 @@ function updateWorld(dt){
   }
   for(const dir of ['up','down','left','right']){
     if(!keys[dir]) continue;
-    game.dir = dir;
+    // 다른 방향을 누르면 한 박자 제자리 회전 (짧게 누르면 방향만 바꾼다)
+    if(game.dir !== dir){ game.dir = dir; turnCool = .09; break; }
+    if(turnCool>0) break;
     const d = {up:[0,-1],down:[0,1],left:[-1,0],right:[1,0]}[dir];
     const nx=game.px+d[0], ny=game.py+d[1];
     if(canWalk(nx,ny)){ game.mx=nx; game.my=ny; game.moving=true; game.prog=0; }
@@ -477,6 +482,7 @@ async function bagScreen(){
 const battle = {
   on:false, enemy:null, trainer:null, trIdx:0, meIdx:0,
   dispE:0, dispP:0, dispExp:0, shakeE:0, shakeP:0, lungeP:0, lungeE:0, flash:0,
+  faintE:0, faintP:0,
   evolveQueue:[], trans:0,
 };
 const activeMon = ()=>game.party[battle.meIdx];
@@ -501,6 +507,7 @@ async function startBattle(opts){
   battle.meIdx = Math.max(0, game.party.findIndex(m=>m.hp>0));
   battle.enemy = tr ? makeMon(tr.party[0][0], tr.party[0][1]) : opts.wild;
   battle.flash=1; battle.trans=0;
+  battle.faintE=0; battle.faintP=0;
   battle.evolveQueue=[];
   dexSee(battle.enemy.name);
   battle.dispE = battle.enemy.hp/battle.enemy.maxhp;
@@ -574,7 +581,11 @@ async function turn(act){
     }
     return;
   }
-  if(act.ball) { const done = await throwBall(); if(done||!battle.on) return; }
+  if(act.ball) {
+    const done = await throwBall();
+    if(done===null) return;          // 던질 수 없었음 — 턴을 소비하지 않는다
+    if(done||!battle.on) return;
+  }
   if(act.potion){
     const key = act.potion, amount = key==='potion'?20:60;
     if(game.items[key]<=0){ await say('하나도 없다!'); return; }
@@ -611,9 +622,28 @@ async function doMove(user,target,move,isPlayer){
   const {dmg,mul,crit} = calcDamage(user,target,move);
   target.hp = Math.max(0, target.hp-dmg);
   await wait(250);
+  await hpSettle();                  // HP바가 다 줄어든 뒤에 결과를 알린다
   if(crit) await say('급소에 맞았다!');
   if(mul>1) await say('효과가 굉장했다!');
   else if(mul<1) await say('효과가 별로인 듯하다…');
+}
+// HP바 애니메이션이 실제 수치를 따라잡을 때까지 잠깐 대기
+async function hpSettle(){
+  for(let i=0;i<90 && battle.on && battle.enemy;i++){
+    const me = activeMon(), en = battle.enemy;
+    if(Math.abs(battle.dispE-en.hp/en.maxhp)<.02 &&
+       Math.abs(battle.dispP-me.hp/me.maxhp)<.02) break;
+    await frame();
+  }
+}
+// 쓰러진 몬스터가 가라앉으며 사라지는 연출
+async function faintAnim(key){
+  const t0 = performance.now();
+  while(performance.now()-t0 < 450){
+    battle[key] = Math.min(1,(performance.now()-t0)/450);
+    await frame();
+  }
+  battle[key] = 1;
 }
 async function gainExp(faintedEnemy){
   const me = activeMon();
@@ -644,14 +674,16 @@ async function gainExp(faintedEnemy){
 async function enemyFainted(){
   const en = battle.enemy, tr = battle.trainer;
   sfx('faint');
+  await faintAnim('faintE');
   await say(`${tr?'상대 ':'야생 '}${josa(en.name,'은는')} 쓰러졌다!`);
+  if(!tr) playSong('victory');   // 야생전 승리 팡파르 (경험치 메시지 동안 재생)
   await gainExp(en);
   if(tr){
     battle.trIdx++;
     if(battle.trIdx < tr.party.length){
       battle.enemy = makeMon(tr.party[battle.trIdx][0], tr.party[battle.trIdx][1]);
       dexSee(battle.enemy.name);
-      battle.dispE = 1;
+      battle.dispE = 1; battle.faintE = 0;
       await say(`${josa(tr.name,'은는')} ${josa(battle.enemy.name,'을를')} 내보냈다!`);
       return; // battleLoop 계속
     }
@@ -666,11 +698,11 @@ async function enemyFainted(){
     if(tr.champion) await endingSequence();
     return;
   }
-  playSong('victory');
   endBattle();
 }
 async function playerFainted(){
   sfx('faint');
+  await faintAnim('faintP');
   await say(`${josa(activeMon().name,'은는')} 쓰러졌다…`);
   const alive = game.party.map((m,i)=>i).filter(i=>game.party[i].hp>0);
   if(alive.length){
@@ -679,6 +711,7 @@ async function playerFainted(){
     battle.meIdx = alive[c];
     battle.dispP = activeMon().hp/activeMon().maxhp;
     battle.dispExp = expRatio(activeMon());
+    battle.faintP = 0;
     await say(`가라! ${activeMon().name}!`);
     return;
   }
@@ -691,8 +724,8 @@ async function playerFainted(){
   saveGame();
 }
 async function throwBall(){
-  if(battle.trainer){ await say('남의 몬스터에게 볼을 던질 수는 없다!'); return false; }
-  if(game.items.ball<=0){ await say('몬스터볼이 없다!'); return false; }
+  if(battle.trainer){ await say('남의 몬스터에게 볼을 던질 수는 없다!'); return null; }
+  if(game.items.ball<=0){ await say('몬스터볼이 없다!'); return null; }
   game.items.ball--;
   const en = battle.enemy;
   sfx('ball');
@@ -708,12 +741,12 @@ async function throwBall(){
   await wait(350);
   if(shakes>=3){
     sfx('catch');
+    playSong('victory');
     en.hp = Math.max(1,en.hp);
     await say(`신난다! ${josa(en.name,'을를')} 잡았다!`);
     dexCaught(en.name);
     if(game.party.length<6){ game.party.push(en); await say(`${josa(en.name,'이가')} 동료가 되었다!`); }
     else { game.box.push(en); await say(`파티가 가득 차 ${josa(en.name,'은는')}\n연구소 보관함으로 보내졌다.`); }
-    playSong('victory');
     endBattle();
     return true;
   }
@@ -782,7 +815,13 @@ async function titleMenu(){
   try{
     const has = !!localStorage.getItem(SAVE_KEY);
     if(has){
-      const c = await choose(['이어하기','새로운 모험'],{x:VW/2-70,y:190,w:140,cancel:false});
+      // 저장된 모험의 요약을 보여준다
+      let info = '';
+      try{
+        const s = JSON.parse(localStorage.getItem(SAVE_KEY));
+        if(s?.party?.length) info = `${MAPS[s.map]?.name||'?'} · ${s.party[0].name} Lv${s.party[0].lvl}`;
+      }catch(e){}
+      const c = await choose(['이어하기','새로운 모험'],{x:VW/2-85,y:184,w:170,cancel:false,prompt:info});
       if(c===0 && loadGame()){
         mode='world'; banner.text=curMap().name; banner.t=2;
         playSong(curMap().music);
@@ -936,6 +975,20 @@ function drawWorld(){
   if(walkFlip){ ctx.translate(Math.round(pxf*TILE-camX)+16, 0); ctx.scale(-1,1); ctx.drawImage(spr,0,Math.round(pyf*TILE-camY-3-bob),16,16); }
   else ctx.drawImage(spr, Math.round(pxf*TILE-camX), Math.round(pyf*TILE-camY-3-bob), 16,16);
   ctx.restore();
+  // 풀숲 위에 서 있으면 하반신이 풀에 가려진다
+  const grassTiles = [[game.px,game.py]];
+  if(game.moving) grassTiles.push([game.mx,game.my]);
+  if(game.party.length){
+    grassTiles.push([game.trail[0].x,game.trail[0].y]);
+    if(game.moving && game.trail[1]) grassTiles.push([game.trail[1].x,game.trail[1].y]);
+  }
+  for(const [gx,gy] of grassTiles){
+    if(tileAt(gx,gy)!=='w') continue;
+    const sx=gx*TILE-camX, sy=gy*TILE-camY;
+    ctx.fillStyle=C.tall; ctx.fillRect(sx,sy+10,16,6);
+    ctx.fillStyle=C.tallD;
+    for(let i=0;i<4;i++) ctx.fillRect(sx+1+i*4,sy+8,2,7);
+  }
   // 맵 이름 배너
   if(banner.t>0){
     const a = Math.min(1,banner.t);
@@ -951,16 +1004,16 @@ function drawWorld(){
     ctx.fillStyle=`rgba(255,255,240,${Math.min(0.85,healFx.t)})`;
     ctx.fillRect(0,0,VW,VH);
   }
+  // 맵 전환 페이드 인
+  if(fade.t>0){
+    ctx.fillStyle=`rgba(26,28,44,${Math.min(1,fade.t)})`;
+    ctx.fillRect(0,0,VW,VH);
+  }
   // 배틀 전환 효과
   if(battle.trans>0){
     ctx.fillStyle='#222034';
     const r = battle.trans*VW*0.75;
     ctx.beginPath(); ctx.arc(VW/2,VH/2,r,0,7); ctx.fill();
-  }
-  // 음소거 표시
-  if(!audio.on){
-    ctx.fillStyle='rgba(34,32,52,.7)'; ctx.fillRect(VW-26,VH-20,22,16);
-    ctx.fillStyle='#fffce8'; ctx.font='10px sans-serif'; ctx.fillText('♪✕', VW-23, VH-8);
   }
 }
 function hpColor(r){ return r>0.5?'#4fae4f':r>0.2?'#e8a020':'#e85a5a'; }
@@ -987,8 +1040,10 @@ function drawBattle(){
       ctx.beginPath(); ctx.arc(0,0,4.5,0,7); ctx.fill();
       ctx.fillStyle='#f8f8f8'; ctx.beginPath(); ctx.arc(0,0,2.5,0,7); ctx.fill();
       ctx.restore();
-    } else {
-      ctx.drawImage(SPR[en.name],0,0,16,16, 200+shE+lgE, 48, 64,64);
+    } else if(battle.faintE<1){
+      ctx.save(); ctx.globalAlpha = 1-battle.faintE;
+      ctx.drawImage(SPR[en.name],0,0,16,16, 200+shE+lgE, 48+battle.faintE*32, 64,64);
+      ctx.restore();
     }
     panel(12,12,148,46);
     ctx.fillStyle='#222034'; ctx.font='bold 12px sans-serif';
@@ -1002,15 +1057,21 @@ function drawBattle(){
     const shP = battle.shakeP>0?Math.sin(battle.shakeP*40)*3:0;
     const lgP = battle.lungeP>0?Math.sin(battle.lungeP*Math.PI)*8:0;
     ctx.fillStyle='#c8d8b0'; ctx.beginPath(); ctx.ellipse(80,196,50,12,0,0,7); ctx.fill();
-    ctx.save(); ctx.translate(116+shP+lgP,128); ctx.scale(-1,1);
-    ctx.drawImage(SPR[me.name],0,0,16,16,-36,0,72,72);
-    ctx.restore();
+    if(battle.faintP<1){
+      ctx.save(); ctx.globalAlpha = 1-battle.faintP;
+      ctx.translate(116+shP+lgP,128+battle.faintP*32); ctx.scale(-1,1);
+      ctx.drawImage(SPR[me.name],0,0,16,16,-36,0,72,72);
+      ctx.restore();
+    }
     panel(164,134,148,62);
     ctx.fillStyle='#222034'; ctx.font='bold 12px sans-serif';
     ctx.fillText(`${me.name}  Lv${me.lvl}`, 172, 150);
     drawHPBar(172,156,124,battle.dispP);
     ctx.font='11px sans-serif';
-    ctx.fillText(`${me.hp} / ${me.maxhp}`, 172, 174);
+    // HP 숫자도 바와 함께 줄어드는 애니메이션
+    const shownHp = Math.abs(battle.dispP - me.hp/me.maxhp)<.01
+      ? me.hp : Math.max(0,Math.round(battle.dispP*me.maxhp));
+    ctx.fillText(`${shownHp} / ${me.maxhp}`, 172, 174);
     // EXP 바
     ctx.fillStyle='#222034'; ctx.fillRect(172,180,124,4);
     ctx.fillStyle='#4a90e8'; ctx.fillRect(173,181,Math.round(122*battle.dispExp),2);
@@ -1041,7 +1102,13 @@ function drawBattle(){
     const mv = MOVES[sel];
     if(mv){
       ctx.font='11px sans-serif';
-      ctx.fillText(`타입:${TYPE_KO[mv.type]}  위력:${mv.power}`, 196, 282);
+      let info = `타입:${TYPE_KO[mv.type]}  위력:${mv.power}`;
+      if(battle.enemy){
+        const mul = typeMul(mv.type, DEX[battle.enemy.name].type);
+        if(mul>1) info += '  ▲굉장';
+        else if(mul<1) info += '  ▽별로';
+      }
+      ctx.fillText(info, 178, 282);
     }
   }
   if(battle.flash>0){ ctx.fillStyle=`rgba(255,255,255,${battle.flash})`; ctx.fillRect(0,0,VW,VH); }
@@ -1165,6 +1232,7 @@ function loop(now){
   clock += dt;
   banner.t = Math.max(0,banner.t-dt);
   alert_.t = Math.max(0,alert_.t-dt);
+  fade.t = Math.max(0,fade.t-dt*3);
   battle.shakeE = Math.max(0,battle.shakeE-dt*3);
   battle.shakeP = Math.max(0,battle.shakeP-dt*3);
   battle.lungeE = Math.max(0,battle.lungeE-dt*4);
@@ -1191,6 +1259,11 @@ function loop(now){
   }
   drawChooser();
   drawDialogBox();
+  // 음소거 표시 (모든 화면 공통, 우상단)
+  if(!audio.on){
+    ctx.fillStyle='rgba(34,32,52,.7)'; ctx.fillRect(VW-26,4,22,16);
+    ctx.fillStyle='#fffce8'; ctx.font='10px sans-serif'; ctx.fillText('♪✕', VW-23, 16);
+  }
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
