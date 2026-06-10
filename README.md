@@ -19,6 +19,22 @@ python3 -m http.server 8642
 
 데이터 정합성 검사(개발용): `node validate.js`
 
+## Vercel 배포
+
+빌드 과정이 없는 순수 정적 사이트라 그대로 올리면 됩니다. [vercel.json](vercel.json)에 캐시 정책이, [.vercelignore](.vercelignore)에 배포 제외 목록이 설정되어 있습니다.
+
+**방법 A — GitHub 연동(권장)**
+1. `git push origin main`
+2. [vercel.com/new](https://vercel.com/new) → `buildon99x/poketmon-y` 저장소 Import
+3. Framework Preset: **Other**, Build Command·Output Directory 비워둠 → Deploy
+4. 이후엔 `main`에 푸시할 때마다 자동 재배포
+
+**방법 B — CLI**
+```sh
+npx vercel login     # 최초 1회
+npx vercel --prod    # 프로젝트 루트에서 실행
+```
+
 ## 조작
 
 | 키 | 동작 |
