@@ -283,12 +283,13 @@ async function onStep(){
   }
   // 트레이너 시야
   if(await checkSight()) return;
-  // 야생 인카운터
+  // 야생 인카운터 — 트레이너를 이길수록 야생도 강해진다 (성장 페이싱)
   const enc = curMap().encounters;
   if(enc && tileAt(game.px,game.py)==='w' && Math.random()<enc.rate && game.party.some(m=>m.hp>0)){
     let r=Math.random(), name=enc.pool[0][0];
     for(const [n,p] of enc.pool){ if(r<p){name=n;break;} r-=p; }
-    const boost = game.flags.champion ? 8 : 0;  // 클리어 후엔 강한 야생이 나온다
+    const beaten = Object.values(game.flags.trainers).filter(Boolean).length;
+    const boost = game.flags.champion ? 8 : Math.min(6, beaten*2);
     const lvl = enc.lvl[0] + rnd(enc.lvl[1]-enc.lvl[0]+1) + boost;
     await startBattle({wild:makeMon(name,lvl)});
   }
@@ -671,30 +672,40 @@ async function faintAnim(key){
   }
   battle[key] = 1;
 }
-async function gainExp(faintedEnemy){
-  const me = activeMon();
-  let gain = Math.floor(DEX[faintedEnemy.name].exp * faintedEnemy.lvl / 5) + 1;
-  if(battle.trainer) gain = Math.floor(gain*1.5);
-  me.exp += gain;
-  await say(`${josa(me.name,'은는')} 경험치 ${josa(gain,'을를')} 얻었다!`);
-  while(me.exp >= expToNext(me.lvl+1)){
-    me.lvl++;
-    const grow = maxHpOf(DEX[me.name].hp,me.lvl) - me.maxhp;
-    me.maxhp += grow; me.hp = Math.min(me.maxhp, me.hp+grow);
+async function awardExp(mn, gain, announce){
+  mn.exp += gain;
+  if(announce) await say(`${josa(mn.name,'은는')} 경험치 ${josa(gain,'을를')} 얻었다!`);
+  while(mn.exp >= expToNext(mn.lvl+1)){
+    mn.lvl++;
+    const grow = maxHpOf(DEX[mn.name].hp,mn.lvl) - mn.maxhp;
+    mn.maxhp += grow; mn.hp = Math.min(mn.maxhp, mn.hp+grow);
     sfx('lvl');
-    await say(`${josa(me.name,'은는')} 레벨 ${josa(me.lvl,'이가')} 되었다!\n최대 HP ${me.maxhp} (+${grow})`);
-    for(const [l,mv] of DEX[me.name].learn){
-      if(l===me.lvl && !me.moves.includes(mv)){
-        if(me.moves.length>=4){
-          const old = me.moves.shift();
-          await say(`${josa(me.name,'은는')} ${josa(old,'을를')} 잊고…`);
+    await say(`${josa(mn.name,'은는')} 레벨 ${josa(mn.lvl,'이가')} 되었다!\n최대 HP ${mn.maxhp} (+${grow})`);
+    for(const [l,mv] of DEX[mn.name].learn){
+      if(l===mn.lvl && !mn.moves.includes(mv)){
+        if(mn.moves.length>=4){
+          const old = mn.moves.shift();
+          await say(`${josa(mn.name,'은는')} ${josa(old,'을를')} 잊고…`);
         }
-        me.moves.push(mv);
+        mn.moves.push(mv);
         await say(`${josa(mv,'을를')} 배웠다!`);
       }
     }
-    const ev = DEX[me.name].evolve;
-    if(ev && me.lvl>=ev.lv && !battle.evolveQueue.includes(me)) battle.evolveQueue.push(me);
+    const ev = DEX[mn.name].evolve;
+    if(ev && mn.lvl>=ev.lv && !battle.evolveQueue.includes(mn)) battle.evolveQueue.push(mn);
+  }
+}
+async function gainExp(faintedEnemy){
+  let gain = Math.floor(DEX[faintedEnemy.name].exp * faintedEnemy.lvl / 5) + 1;
+  if(battle.trainer) gain = Math.floor(gain*1.5);
+  await awardExp(activeMon(), gain, true);
+  // 벤치의 동료들도 경험치를 1/3씩 나눠 받는다 (쓰러진 멤버 제외)
+  const shared = Math.floor(gain/3);
+  if(shared>0){
+    for(let i=0;i<game.party.length;i++){
+      if(i===battle.meIdx || game.party[i].hp<=0) continue;
+      await awardExp(game.party[i], shared, false);
+    }
   }
 }
 async function enemyFainted(){
@@ -793,6 +804,7 @@ async function throwBall(){
     en.hp = Math.max(1,en.hp);
     await say(`신난다! ${josa(en.name,'을를')} 잡았다!`);
     dexCaught(en.name);
+    await gainExp(en);   // 포획도 쓰러뜨린 것과 같은 경험치 (수집 → 성장 연결)
     if(game.party.length<6){ game.party.push(en); await say(`${josa(en.name,'이가')} 동료가 되었다!`); }
     else { game.box.push(en); await say(`파티가 가득 차 ${josa(en.name,'은는')}\n연구소 보관함으로 보내졌다.`); }
     endBattle();
