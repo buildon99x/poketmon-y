@@ -9,7 +9,11 @@ const TILE = 16, VW = 320, VH = 288;
 const SAVE_KEY = 'pmy-save-v2';
 
 /* ================= 유틸 ================= */
-const frame = () => new Promise(r=>requestAnimationFrame(r));
+// rAF 기반 + 백그라운드 탭에서 rAF가 멈춰도 진행되도록 setTimeout 폴백
+const frame = () => new Promise(r=>{
+  let done=false; const f=()=>{ if(!done){ done=true; r(); } };
+  requestAnimationFrame(f); setTimeout(f,50);
+});
 const wait = ms => new Promise(r=>setTimeout(r,ms));
 const lerp = (a,b,t)=>a+(b-a)*t;
 const rnd = n => Math.floor(Math.random()*n);
@@ -168,6 +172,12 @@ addEventListener('keydown', e=>{
 });
 addEventListener('keyup', e=>{ const k=normKey(e.key); if(k) keys[k]=false; });
 
+// 탭이 백그라운드로 가면 음악 정지, 돌아오면 재개
+document.addEventListener('visibilitychange', ()=>{
+  if(document.hidden){ if(audio.timer){ clearInterval(audio.timer); audio.timer=null; } }
+  else playSong(audio.want);
+});
+
 // 터치 컨트롤
 document.querySelectorAll('[data-k]').forEach(btn=>{
   const k = btn.dataset.k;
@@ -262,7 +272,8 @@ async function onStep(){
   if(enc && tileAt(game.px,game.py)==='w' && Math.random()<enc.rate && game.party.some(m=>m.hp>0)){
     let r=Math.random(), name=enc.pool[0][0];
     for(const [n,p] of enc.pool){ if(r<p){name=n;break;} r-=p; }
-    const lvl = enc.lvl[0] + rnd(enc.lvl[1]-enc.lvl[0]+1);
+    const boost = game.flags.champion ? 8 : 0;  // 클리어 후엔 강한 야생이 나온다
+    const lvl = enc.lvl[0] + rnd(enc.lvl[1]-enc.lvl[0]+1) + boost;
     await startBattle({wild:makeMon(name,lvl)});
   }
 }
@@ -315,10 +326,13 @@ function tryInteract(){
   if(door==='shop') return shopFlow();
   if(door==='pc') return pcFlow();
 }
+const healFx = {t:0};
 async function healHouse(){
   await say('엄마: 어서 오렴! 모두들 푹 쉬고 가~');
   sfx('heal');
+  healFx.t = 1;                 // 화면이 부드럽게 밝아지는 회복 연출
   for(const mn of game.party){ mn.hp = mn.maxhp; }
+  await wait(500);
   await say('포켓 몬스터들이 모두 기운을 되찾았다!');
   saveGame();
 }
@@ -336,6 +350,13 @@ async function professorTalk(){
     game.flags.starter = true;
     saveGame();
     await say('볼티가 기쁜 듯이 노랑의 뒤를 따라왔다!');
+  } else if(game.dex.caught.length>=DEX_ORDER.length && !game.flags.dexReward){
+    game.flags.dexReward = true;
+    await say('박사: 도감을 전부 완성했다고!? 놀랍구나!');
+    sfx('money');
+    game.items.spotion += 3;
+    await say('축하 선물로 고급 물약 3개를 받았다!');
+    saveGame();
   } else if(game.flags.champion){
     await say('박사: 챔피언이 되었다고? 정말 자랑스럽구나!\n도감 완성도 잊지 말려무나.');
   } else {
@@ -401,9 +422,16 @@ async function fieldMenu(){
     }
   } finally { menuBusy = false; }
 }
+const dexUI = {sel:0};
 async function dexScreen(){
-  const prev = mode; mode='dex';
-  await waitAnyKey();
+  const prev = mode; mode='dex'; dexUI.sel=0;
+  while(true){
+    const k = await waitAnyKey();
+    const n = DEX_ORDER.length;
+    if(k==='up'){ dexUI.sel=(dexUI.sel+n-1)%n; sfx('sel'); }
+    else if(k==='down'){ dexUI.sel=(dexUI.sel+1)%n; sfx('sel'); }
+    else if(k==='A'||k==='B') break;
+  }
   mode = prev;
 }
 async function partyScreen(){
@@ -918,11 +946,21 @@ function drawWorld(){
     ctx.textAlign='left';
     ctx.globalAlpha = 1;
   }
+  // 회복 연출 (흰 빛 페이드)
+  if(healFx.t>0){
+    ctx.fillStyle=`rgba(255,255,240,${Math.min(0.85,healFx.t)})`;
+    ctx.fillRect(0,0,VW,VH);
+  }
   // 배틀 전환 효과
   if(battle.trans>0){
     ctx.fillStyle='#222034';
     const r = battle.trans*VW*0.75;
     ctx.beginPath(); ctx.arc(VW/2,VH/2,r,0,7); ctx.fill();
+  }
+  // 음소거 표시
+  if(!audio.on){
+    ctx.fillStyle='rgba(34,32,52,.7)'; ctx.fillRect(VW-26,VH-20,22,16);
+    ctx.fillStyle='#fffce8'; ctx.font='10px sans-serif'; ctx.fillText('♪✕', VW-23, VH-8);
   }
 }
 function hpColor(r){ return r>0.5?'#4fae4f':r>0.2?'#e8a020':'#e85a5a'; }
@@ -1062,20 +1100,40 @@ function drawEnding(){
 }
 function drawDex(){
   drawWorld();
-  panel(20,14,VW-40,VH-28);
+  panel(8,10,VW-16,VH-20);
   ctx.fillStyle='#222034'; ctx.font='bold 13px sans-serif';
-  ctx.fillText(`몬스터 도감  (포획 ${game.dex.caught.length} / 발견 ${game.dex.seen.length} / 전체 ${DEX_ORDER.length})`, 32, 36);
+  ctx.fillText(`몬스터 도감  포획 ${game.dex.caught.length}·발견 ${game.dex.seen.length}/${DEX_ORDER.length}`, 20, 30);
+  // 왼쪽: 목록
   ctx.font='12px sans-serif';
   DEX_ORDER.forEach((n,i)=>{
-    const col = Math.floor(i/6), x = 34+col*140, y = 58+(i%6)*22;
+    const y = 52+i*17;
     const caught = game.dex.caught.includes(n), seen = game.dex.seen.includes(n);
-    const mark = caught?'●':seen?'○':'　';
+    const mark = caught?'●':seen?'○':'·';
     const label = (caught||seen) ? n : '？？？';
-    ctx.fillText(`${String(DEX[n].no).padStart(2,'0')} ${mark} ${label}`, x, y);
+    if(i===dexUI.sel){ ctx.fillStyle='#e8e0c0'; ctx.fillRect(16,y-12,128,16); }
+    ctx.fillStyle='#222034';
+    ctx.fillText(`${i===dexUI.sel?'▶':' '}${String(DEX[n].no).padStart(2,'0')} ${mark} ${label}`, 18, y);
   });
-  ctx.font='11px sans-serif';
-  const hovered = null;
-  ctx.fillText('● 포획   ○ 발견   (아무 키나 눌러 닫기)', 34, VH-26);
+  // 오른쪽: 상세
+  const name = DEX_ORDER[dexUI.sel];
+  const caught = game.dex.caught.includes(name), seen = game.dex.seen.includes(name);
+  ctx.strokeStyle='#222034'; ctx.lineWidth=1; ctx.strokeRect(156,42,148,224);
+  if(seen||caught){
+    ctx.fillStyle='#eef2da'; ctx.fillRect(186,52,88,88);
+    if(caught) ctx.drawImage(SPR[name],0,0,16,16, 198,62,64,64);
+    else { ctx.save(); ctx.filter='brightness(0)'; ctx.drawImage(SPR[name],0,0,16,16, 198,62,64,64); ctx.restore(); }
+    ctx.fillStyle='#222034'; ctx.font='bold 13px sans-serif';
+    ctx.fillText(name, 166, 158);
+    ctx.font='11px sans-serif';
+    ctx.fillText(`${TYPE_KO[DEX[name].type]} 타입`, 166, 174);
+    if(caught) wrapText(DEX[name].desc, 166, 192, 130, 15);
+    else ctx.fillText('포획하면 정보가 기록된다.', 166, 192);
+  } else {
+    ctx.fillStyle='#888'; ctx.font='12px sans-serif';
+    ctx.fillText('데이터 없음', 200, 150);
+  }
+  ctx.fillStyle='#222034'; ctx.font='10px sans-serif';
+  ctx.fillText('↑↓ 선택  Z/X 닫기', 166, 258);
 }
 function drawChooser(){
   if(!chooser.active || chooser.cfg.tag) return;
@@ -1112,6 +1170,8 @@ function loop(now){
   battle.lungeE = Math.max(0,battle.lungeE-dt*4);
   battle.lungeP = Math.max(0,battle.lungeP-dt*4);
   battle.flash = Math.max(0,battle.flash-dt*2);
+  if(battle.ballAnim) battle.ballAnim.rock = Math.max(0,battle.ballAnim.rock-dt*2.2);
+  healFx.t = Math.max(0,healFx.t-dt*1.2);
   // HP/EXP 바 애니메이션
   if(battle.on && battle.enemy){
     battle.dispE += ((battle.enemy.hp/battle.enemy.maxhp)-battle.dispE)*Math.min(1,dt*6);
@@ -1134,6 +1194,8 @@ function loop(now){
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
+// 백그라운드 탭에서 rAF가 멈췄을 때도 게임이 최소 10fps로 진행되게 한다
+setInterval(()=>{ if(performance.now()-last>200) loop(performance.now()); }, 100);
 
 /* 디버그 핸들 */
 window.DBG = {game, battle, dialog, get chooser(){return chooser;}, get mode(){return mode;}, set mode(v){mode=v;},
