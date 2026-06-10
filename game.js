@@ -234,11 +234,18 @@ function setMap(id,x,y,dir){
   banner.text = MAPS[id].name; banner.t = 2.2;
   fade.t = 1;   // 맵 전환 페이드 인
 }
-let bumpCool = 0, turnCool = 0;
+let bumpCool = 0, turnCool = 0, npcIdleT = 2;
 function updateWorld(dt){
   bumpCool = Math.max(0,bumpCool-dt);
   turnCool = Math.max(0,turnCool-dt);
   if(dialog.active || chooser.active || game.lock) return;
+  // NPC가 가끔 두리번거린다 (트레이너는 시야가 고정이므로 제외)
+  npcIdleT -= dt;
+  if(npcIdleT<=0){
+    npcIdleT = 1.5+Math.random()*2.5;
+    const ns = curMap().npcs||[];
+    if(ns.length) ns[rnd(ns.length)].dir = ['up','down','left','right'][rnd(4)];
+  }
   if(game.moving){
     game.prog += dt*5.5;
     if(game.prog>=1){
@@ -373,8 +380,8 @@ async function professorTalk(){
 async function shopFlow(){
   await say('점원: 어서 오세요! 무엇을 드릴까요?');
   while(true){
-    const opts = Object.keys(ITEMS).map(k=>`${ITEMS[k].name} ${ITEMS[k].price}원`).concat('나가기');
-    const c = await choose(opts,{x:60,y:60,w:200,prompt:`소지금 ${game.money}원`});
+    const opts = Object.keys(ITEMS).map(k=>`${ITEMS[k].name} ${ITEMS[k].price}원 (보유 ${game.items[k]})`).concat('나가기');
+    const c = await choose(opts,{x:45,y:60,w:230,prompt:`소지금 ${game.money}원`});
     if(c<0 || c===opts.length-1) break;
     const key = Object.keys(ITEMS)[c], it = ITEMS[key];
     if(game.money < it.price){ await say('점원: 손님, 돈이 모자라요!'); continue; }
@@ -634,6 +641,7 @@ async function doMove(user,target,move,isPlayer){
   if(isPlayer) battle.shakeE=1; else battle.shakeP=1;
   const {dmg,mul,crit} = calcDamage(user,target,move);
   target.hp = Math.max(0, target.hp-dmg);
+  if(mul>1 || crit) battle.flash = Math.max(battle.flash,0.35);  // 강타 시 화면 섬광
   await wait(250);
   await hpSettle();                  // HP바가 다 줄어든 뒤에 결과를 알린다
   if(crit) await say('급소에 맞았다!');
@@ -669,7 +677,7 @@ async function gainExp(faintedEnemy){
     const grow = maxHpOf(DEX[me.name].hp,me.lvl) - me.maxhp;
     me.maxhp += grow; me.hp = Math.min(me.maxhp, me.hp+grow);
     sfx('lvl');
-    await say(`${josa(me.name,'은는')} 레벨 ${josa(me.lvl,'이가')} 되었다!`);
+    await say(`${josa(me.name,'은는')} 레벨 ${josa(me.lvl,'이가')} 되었다!\n최대 HP ${me.maxhp} (+${grow})`);
     for(const [l,mv] of DEX[me.name].learn){
       if(l===me.lvl && !me.moves.includes(mv)){
         if(me.moves.length>=4){
@@ -694,7 +702,29 @@ async function enemyFainted(){
   if(tr){
     battle.trIdx++;
     if(battle.trIdx < tr.party.length){
-      battle.enemy = makeMon(tr.party[battle.trIdx][0], tr.party[battle.trIdx][1]);
+      const next = makeMon(tr.party[battle.trIdx][0], tr.party[battle.trIdx][1]);
+      // 상대가 다음 몬스터를 내기 전에 교체 기회를 준다 (턴 소비 없음)
+      const hasOther = game.party.some((m,i)=>m.hp>0 && i!==battle.meIdx);
+      if(hasOther){
+        await say(`${josa(tr.name,'은는')} ${josa(next.name,'을를')}\n내보내려 한다.`);
+        const sw = await choose(['그대로 싸운다','교체한다'],{tag:'battle-moves',cancel:false,prompt:'몬스터를 교체할까?'});
+        if(sw===1){
+          while(true){
+            const opts = game.party.map((m,i)=>`${m.name} Lv${m.lvl} ${m.hp}/${m.maxhp}${i===battle.meIdx?' ◀':''}`);
+            const p = await choose(opts,{tag:'battle-moves'});
+            if(p<0 || p===battle.meIdx) break;   // 취소하면 그대로 싸운다
+            if(game.party[p].hp<=0){ await say('쓰러져 있어서 싸울 수 없다!'); continue; }
+            await say(`돌아와, ${activeMon().name}!`);
+            battle.meIdx = p;
+            battle.dispP = activeMon().hp/activeMon().maxhp;
+            battle.dispExp = expRatio(activeMon());
+            battle.faintP = 0;
+            await say(`가라! ${activeMon().name}!`);
+            break;
+          }
+        }
+      }
+      battle.enemy = next;
       dexSee(battle.enemy.name);
       battle.dispE = 1; battle.faintE = 0;
       await say(`${josa(tr.name,'은는')} ${josa(battle.enemy.name,'을를')} 내보냈다!`);
@@ -1045,8 +1075,10 @@ function drawHPBar(x,y,w,ratio){
   ctx.fillStyle=hpColor(ratio); ctx.fillRect(x+1,y+1,Math.max(0,Math.round((w-2)*ratio)),4);
 }
 function drawBattle(){
-  ctx.fillStyle='#f0f8e8'; ctx.fillRect(0,0,VW,VH);
-  ctx.fillStyle='#d8e8c8'; ctx.fillRect(0,170,VW,36);
+  // 장소에 따라 배경 분위기가 달라진다 (스타디움은 모래빛)
+  const inStadium = game.map==='stadium';
+  ctx.fillStyle = inStadium ? '#f6eed8' : '#f0f8e8'; ctx.fillRect(0,0,VW,VH);
+  ctx.fillStyle = inStadium ? '#e4d6ae' : '#d8e8c8'; ctx.fillRect(0,170,VW,36);
   const en = battle.enemy, me = activeMon();
   // 배틀 시작 시 양쪽에서 미끄러져 들어오는 등장 연출
   const intro = 1-Math.pow(1-battle.introT,3);
@@ -1093,6 +1125,13 @@ function drawBattle(){
     ctx.fillStyle='#222034'; ctx.font='bold 12px sans-serif';
     ctx.fillText(`${me.name}  Lv${me.lvl}`, 172, 150);
     drawHPBar(172,156,124,battle.dispP);
+    // 저체력 경고: HP바가 깜빡인다
+    if(battle.dispP>0 && battle.dispP<0.25){
+      ctx.globalAlpha = 0.25+0.25*Math.sin(clock*9);
+      ctx.fillStyle='#fffce8';
+      ctx.fillRect(173,157,Math.max(1,Math.round(122*battle.dispP)),4);
+      ctx.globalAlpha = 1;
+    }
     ctx.font='11px sans-serif';
     // HP 숫자도 바와 함께 줄어드는 애니메이션
     const shownHp = Math.abs(battle.dispP - me.hp/me.maxhp)<.01
