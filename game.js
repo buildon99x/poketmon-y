@@ -333,7 +333,10 @@ function tryInteract(){
   }
   const tr = (m.trainers||[]).find(n=>n.x===tx&&n.y===ty);
   if(tr){
-    if(game.flags.trainers[tr.id]) return say(tr.name+': '+tr.after);
+    if(game.flags.trainers[tr.id]){
+      if(tr.champion && game.flags.champion) return leaderRematch(tr);
+      return say(tr.name+': '+tr.after);
+    }
     return (async()=>{ await startBattle({trainer:tr}); })();
   }
   const sign = (m.signs||{})[tx+','+ty];
@@ -353,6 +356,10 @@ async function healHouse(){
   await say('포켓 몬스터들이 모두 기운을 되찾았다!');
   saveGame();
 }
+const DEX_STAGES = [
+  [4,  '500원과 몬스터볼 2개를',   ()=>{ game.money+=500;  game.items.ball+=2; }],
+  [8,  '1000원과 고급 물약 2개를', ()=>{ game.money+=1000; game.items.spotion+=2; }],
+];
 async function professorTalk(){
   if(!game.flags.starter){
     await say('박사: 오오, 노랑! 기다리고 있었단다.');
@@ -372,13 +379,35 @@ async function professorTalk(){
     await say('박사: 도감을 전부 완성했다고!? 놀랍구나!');
     sfx('money');
     game.items.spotion += 3;
-    await say('축하 선물로 고급 물약 3개를 받았다!');
+    game.money += 2000;
+    await say('축하 선물로 고급 물약 3개와\n연구 지원금 2000원을 받았다!');
+    saveGame();
+  } else if((game.flags.dexStage||0) < DEX_STAGES.length
+            && game.dex.caught.length >= DEX_STAGES[game.flags.dexStage||0][0]){
+    // 도감 단계 보상 — 수집이 곧 재화가 된다
+    const [n, label, grant] = DEX_STAGES[game.flags.dexStage||0];
+    game.flags.dexStage = (game.flags.dexStage||0)+1;
+    await say(`박사: 벌써 ${n}종이나 모았구나! 연구에 큰 도움이 돼!`);
+    grant(); sfx('money');
+    await say(`도감 보상으로 ${label} 받았다!`);
     saveGame();
   } else if(game.flags.champion){
     await say('박사: 챔피언이 되었다고? 정말 자랑스럽구나!\n도감 완성도 잊지 말려무나.');
   } else {
     await say(`박사: 도감은 ${game.dex.caught.length}/${DEX_ORDER.length}종 모았구나.\n북쪽 스타디움의 관장에게 도전해 보렴!`);
+    if((game.flags.dexStage||0) < DEX_STAGES.length)
+      await say(`박사: 도감이 ${DEX_STAGES[game.flags.dexStage||0][0]}종이 되면\n연구비도 챙겨 주마!`);
   }
+}
+// 챔피언 방어전 — 클리어 후 반복 도전 가능한 수입원
+async function leaderRematch(tr){
+  await say(`${tr.name}: 챔피언이여! 그날 이후\n우리는 더 단단해졌다!`);
+  const c = await choose(['승부한다','다음에 하자'],{x:VW/2-80,y:120,w:160,prompt:'방어전을 치를까?'});
+  if(c!==0){ await say(`${tr.name}: 언제든 기다리마!`); return; }
+  await startBattle({trainer:{...tr, id:'leaderRematch', champion:false, prize:1000,
+    party:[['돌돌이',15],['바위왕',17]],
+    intro:'수련의 성과, 온몸으로 받아 보아라!',
+    lose:'챔피언의 자리는 아직 그대의 것…\n다음엔 더 강해져 돌아오마!'}});
 }
 async function shopFlow(){
   await say('점원: 어서 오세요! 무엇을 드릴까요?');
@@ -388,9 +417,15 @@ async function shopFlow(){
     if(c<0 || c===opts.length-1) break;
     const key = Object.keys(ITEMS)[c], it = ITEMS[key];
     if(game.money < it.price){ await say('점원: 손님, 돈이 모자라요!'); continue; }
-    game.money -= it.price; game.items[key]++;
+    // 수량 구매 — 같은 메뉴 반복 없이 한 번에
+    const qOpts = [1,3,5].map(n=>`${n}개 — ${it.price*n}원`).concat('그만두기');
+    const q = await choose(qOpts,{x:60,y:150,w:170,prompt:`${it.name}, 몇 개?`});
+    if(q<0 || q===3) continue;
+    const n = [1,3,5][q], cost = it.price*n;
+    if(game.money < cost){ await say('점원: 손님, 돈이 모자라요!'); continue; }
+    game.money -= cost; game.items[key] += n;
     sfx('money');
-    await say(`${josa(it.name,'을를')} 샀다! (보유 ${game.items[key]}개)`);
+    await say(`${josa(it.name,'을를')} ${n}개 샀다! (보유 ${game.items[key]}개)`);
   }
   await say('점원: 또 오세요~!');
   saveGame();
@@ -776,8 +811,9 @@ async function playerFainted(){
   }
   await say('노랑은 눈앞이 캄캄해졌다…');
   for(const m of game.party) m.hp = m.maxhp;
-  const half = Math.floor(game.money/2);
-  if(half>0){ game.money -= half; await say(`당황한 나머지 ${half}원을 떨어뜨렸다…`); }
+  // 패배는 따끔하되 회복 가능하게: 소지금 1/4 (최대 500원)
+  const loss = Math.min(500, Math.floor(game.money/4));
+  if(loss>0){ game.money -= loss; await say(`당황한 나머지 ${loss}원을 떨어뜨렸다…`); }
   endBattle();
   setMap('town',13,6,'down');
   saveGame();
