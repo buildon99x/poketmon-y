@@ -109,6 +109,7 @@ function sfx(kind){
     lvl:   ()=>[523,659,784,1047,1319].forEach((f,i)=>tone(f,t+i*.07,.1,'square',.05)),
     run:   ()=>{tone(900,t,.05,'square',.04); tone(700,t+.06,.05,'square',.04);},
     money: ()=>{tone(988,t,.07,'square',.05); tone(1319,t+.08,.14,'square',.05);},
+    alert: ()=>{tone(740,t,.08,'square',.06); tone(740,t+.1,.22,'square',.06);},
   })[kind]?.();
 }
 
@@ -119,7 +120,9 @@ function say(text){
   return new Promise(async res=>{
     dialog.active=true; dialog.text=text; dialog.shown=0; dialog.res=res;
     while(dialog.active && dialog.shown < dialog.text.length){
-      dialog.shown++; await frame();
+      // A/B를 누르고 있으면 글자가 빨리 나온다
+      dialog.shown = Math.min(dialog.text.length, dialog.shown + ((keys.A||keys.B)?3:1));
+      await frame();
     }
   });
 }
@@ -225,15 +228,26 @@ function canWalk(x,y){
   return true;
 }
 const banner = {text:'', t:0};
+const fade = {t:0};
 function setMap(id,x,y,dir){
   game.map=id; game.px=x; game.py=y; game.dir=dir||game.dir;
   game.trail=[{x,y},{x,y}];
   banner.text = MAPS[id].name; banner.t = 2.2;
+  fade.t = 1;   // 맵 전환 페이드 인
+  if(MAPS[id].music !== audio.want) playSong(MAPS[id].music);  // 지역별 BGM 전환
 }
-let bumpCool = 0;
+let bumpCool = 0, turnCool = 0, npcIdleT = 2;
 function updateWorld(dt){
   bumpCool = Math.max(0,bumpCool-dt);
+  turnCool = Math.max(0,turnCool-dt);
   if(dialog.active || chooser.active || game.lock) return;
+  // NPC가 가끔 두리번거린다 (트레이너는 시야가 고정이므로 제외)
+  npcIdleT -= dt;
+  if(npcIdleT<=0){
+    npcIdleT = 1.5+Math.random()*2.5;
+    const ns = curMap().npcs||[];
+    if(ns.length) ns[rnd(ns.length)].dir = ['up','down','left','right'][rnd(4)];
+  }
   if(game.moving){
     game.prog += dt*5.5;
     if(game.prog>=1){
@@ -245,7 +259,9 @@ function updateWorld(dt){
   }
   for(const dir of ['up','down','left','right']){
     if(!keys[dir]) continue;
-    game.dir = dir;
+    // 다른 방향을 누르면 한 박자 제자리 회전 (짧게 누르면 방향만 바꾼다)
+    if(game.dir !== dir){ game.dir = dir; turnCool = .13; break; }
+    if(turnCool>0) break;
     const d = {up:[0,-1],down:[0,1],left:[-1,0],right:[1,0]}[dir];
     const nx=game.px+d[0], ny=game.py+d[1];
     if(canWalk(nx,ny)){ game.mx=nx; game.my=ny; game.moving=true; game.prog=0; }
@@ -267,12 +283,13 @@ async function onStep(){
   }
   // 트레이너 시야
   if(await checkSight()) return;
-  // 야생 인카운터
+  // 야생 인카운터 — 트레이너를 이길수록 야생도 강해진다 (성장 페이싱)
   const enc = curMap().encounters;
   if(enc && tileAt(game.px,game.py)==='w' && Math.random()<enc.rate && game.party.some(m=>m.hp>0)){
     let r=Math.random(), name=enc.pool[0][0];
     for(const [n,p] of enc.pool){ if(r<p){name=n;break;} r-=p; }
-    const boost = game.flags.champion ? 8 : 0;  // 클리어 후엔 강한 야생이 나온다
+    const beaten = Object.values(game.flags.trainers).filter(Boolean).length;
+    const boost = game.flags.champion ? 8 : Math.min(6, beaten*2);
     const lvl = enc.lvl[0] + rnd(enc.lvl[1]-enc.lvl[0]+1) + boost;
     await startBattle({wild:makeMon(name,lvl)});
   }
@@ -291,7 +308,7 @@ async function checkSight(){
     if(!hit) continue;
     game.lock = true;
     alert_.x=tr.x; alert_.y=tr.y; alert_.t=.7;
-    sfx('sel');
+    sfx('alert');
     // 플레이어가 트레이너를 바라보게
     game.dir = {up:'down',down:'up',left:'right',right:'left'}[tr.dir];
     await wait(700);
@@ -316,7 +333,10 @@ function tryInteract(){
   }
   const tr = (m.trainers||[]).find(n=>n.x===tx&&n.y===ty);
   if(tr){
-    if(game.flags.trainers[tr.id]) return say(tr.name+': '+tr.after);
+    if(game.flags.trainers[tr.id]){
+      if(tr.champion && game.flags.champion) return leaderRematch(tr);
+      return say(tr.name+': '+tr.after);
+    }
     return (async()=>{ await startBattle({trainer:tr}); })();
   }
   const sign = (m.signs||{})[tx+','+ty];
@@ -336,6 +356,10 @@ async function healHouse(){
   await say('포켓 몬스터들이 모두 기운을 되찾았다!');
   saveGame();
 }
+const DEX_STAGES = [
+  [4,  '500원과 몬스터볼 2개를',   ()=>{ game.money+=500;  game.items.ball+=2; }],
+  [8,  '1000원과 고급 물약 2개를', ()=>{ game.money+=1000; game.items.spotion+=2; }],
+];
 async function professorTalk(){
   if(!game.flags.starter){
     await say('박사: 오오, 노랑! 기다리고 있었단다.');
@@ -355,25 +379,53 @@ async function professorTalk(){
     await say('박사: 도감을 전부 완성했다고!? 놀랍구나!');
     sfx('money');
     game.items.spotion += 3;
-    await say('축하 선물로 고급 물약 3개를 받았다!');
+    game.money += 2000;
+    await say('축하 선물로 고급 물약 3개와\n연구 지원금 2000원을 받았다!');
+    saveGame();
+  } else if((game.flags.dexStage||0) < DEX_STAGES.length
+            && game.dex.caught.length >= DEX_STAGES[game.flags.dexStage||0][0]){
+    // 도감 단계 보상 — 수집이 곧 재화가 된다
+    const [n, label, grant] = DEX_STAGES[game.flags.dexStage||0];
+    game.flags.dexStage = (game.flags.dexStage||0)+1;
+    await say(`박사: 벌써 ${n}종이나 모았구나! 연구에 큰 도움이 돼!`);
+    grant(); sfx('money');
+    await say(`도감 보상으로 ${label} 받았다!`);
     saveGame();
   } else if(game.flags.champion){
     await say('박사: 챔피언이 되었다고? 정말 자랑스럽구나!\n도감 완성도 잊지 말려무나.');
   } else {
     await say(`박사: 도감은 ${game.dex.caught.length}/${DEX_ORDER.length}종 모았구나.\n북쪽 스타디움의 관장에게 도전해 보렴!`);
+    if((game.flags.dexStage||0) < DEX_STAGES.length)
+      await say(`박사: 도감이 ${DEX_STAGES[game.flags.dexStage||0][0]}종이 되면\n연구비도 챙겨 주마!`);
   }
+}
+// 챔피언 방어전 — 클리어 후 반복 도전 가능한 수입원
+async function leaderRematch(tr){
+  await say(`${tr.name}: 챔피언이여! 그날 이후\n우리는 더 단단해졌다!`);
+  const c = await choose(['승부한다','다음에 하자'],{x:VW/2-80,y:120,w:160,prompt:'방어전을 치를까?'});
+  if(c!==0){ await say(`${tr.name}: 언제든 기다리마!`); return; }
+  await startBattle({trainer:{...tr, id:'leaderRematch', champion:false, prize:1000,
+    party:[['돌돌이',15],['바위왕',17]],
+    intro:'수련의 성과, 온몸으로 받아 보아라!',
+    lose:'챔피언의 자리는 아직 그대의 것…\n다음엔 더 강해져 돌아오마!'}});
 }
 async function shopFlow(){
   await say('점원: 어서 오세요! 무엇을 드릴까요?');
   while(true){
-    const opts = Object.keys(ITEMS).map(k=>`${ITEMS[k].name} ${ITEMS[k].price}원`).concat('나가기');
-    const c = await choose(opts,{x:60,y:60,w:200,prompt:`소지금 ${game.money}원`});
+    const opts = Object.keys(ITEMS).map(k=>`${ITEMS[k].name} ${ITEMS[k].price}원 (보유 ${game.items[k]})`).concat('나가기');
+    const c = await choose(opts,{x:45,y:60,w:230,prompt:`소지금 ${game.money}원`});
     if(c<0 || c===opts.length-1) break;
     const key = Object.keys(ITEMS)[c], it = ITEMS[key];
     if(game.money < it.price){ await say('점원: 손님, 돈이 모자라요!'); continue; }
-    game.money -= it.price; game.items[key]++;
+    // 수량 구매 — 같은 메뉴 반복 없이 한 번에
+    const qOpts = [1,3,5].map(n=>`${n}개 — ${it.price*n}원`).concat('그만두기');
+    const q = await choose(qOpts,{x:60,y:150,w:170,prompt:`${it.name}, 몇 개?`});
+    if(q<0 || q===3) continue;
+    const n = [1,3,5][q], cost = it.price*n;
+    if(game.money < cost){ await say('점원: 손님, 돈이 모자라요!'); continue; }
+    game.money -= cost; game.items[key] += n;
     sfx('money');
-    await say(`${josa(it.name,'을를')} 샀다! (보유 ${game.items[key]}개)`);
+    await say(`${josa(it.name,'을를')} ${n}개 샀다! (보유 ${game.items[key]}개)`);
   }
   await say('점원: 또 오세요~!');
   saveGame();
@@ -403,13 +455,14 @@ async function pcFlow(){
 }
 
 /* ================= 필드 메뉴 ================= */
-let menuBusy = false;
+let menuBusy = false, menuIdx = 0;
 async function fieldMenu(){
   if(menuBusy || !game.flags.starter) return;
   menuBusy = true;
   try{
     while(true){
-      const c = await choose(['도감','포켓몬','가방','리포트','옵션','닫기'],{x:VW-112,y:8,w:104});
+      const c = await choose(['도감','포켓몬','가방','리포트','옵션','닫기'],{x:VW-112,y:8,w:104,idx:menuIdx});
+      if(c>=0 && c<5) menuIdx = c;   // 커서 위치 기억
       if(c<0 || c===5) break;
       if(c===0) await dexScreen();
       if(c===1) await partyScreen();
@@ -477,6 +530,7 @@ async function bagScreen(){
 const battle = {
   on:false, enemy:null, trainer:null, trIdx:0, meIdx:0,
   dispE:0, dispP:0, dispExp:0, shakeE:0, shakeP:0, lungeP:0, lungeE:0, flash:0,
+  faintE:0, faintP:0, introT:1,
   evolveQueue:[], trans:0,
 };
 const activeMon = ()=>game.party[battle.meIdx];
@@ -501,6 +555,7 @@ async function startBattle(opts){
   battle.meIdx = Math.max(0, game.party.findIndex(m=>m.hp>0));
   battle.enemy = tr ? makeMon(tr.party[0][0], tr.party[0][1]) : opts.wild;
   battle.flash=1; battle.trans=0;
+  battle.faintE=0; battle.faintP=0; battle.introT=0;
   battle.evolveQueue=[];
   dexSee(battle.enemy.name);
   battle.dispE = battle.enemy.hp/battle.enemy.maxhp;
@@ -525,9 +580,11 @@ async function battleLoop(){
   while(battle.on){
     const c = await choose(['싸운다','가방','포켓몬','도망간다'],
       {cols:2, tag:'battle-main', cancel:false, prompt:`${josa(activeMon().name,'은는')} 무엇을 할까?`});
-    if(c===0){ // 싸운다
-      const mv = await choose(activeMon().moves, {tag:'battle-moves'});
+    if(c===0){ // 싸운다 — 마지막에 쓴 기술 위치를 기억한다
+      const idx = Math.min(battle.lastMv||0, activeMon().moves.length-1);
+      const mv = await choose(activeMon().moves, {tag:'battle-moves', idx});
       if(mv<0) continue;
+      battle.lastMv = mv;
       await turn({move:mv});
     }
     else if(c===1){ // 가방
@@ -544,9 +601,11 @@ async function battleLoop(){
       if(game.party[p].hp<=0){ await say('쓰러져 있어서 싸울 수 없다!'); continue; }
       await turn({switch:p});
     }
-    else { // 도망
+    else { // 도망 — 내 몬스터가 빠르면 반드시 성공
       if(battle.trainer){ await say('트레이너 승부에서 도망칠 수는 없다!'); continue; }
-      if(Math.random()<0.75){ sfx('run'); await say('무사히 도망쳤다!'); return endBattle(); }
+      const mySpd = statOf(DEX[activeMon().name].spd, activeMon().lvl);
+      const enSpd = statOf(DEX[battle.enemy.name].spd, battle.enemy.lvl);
+      if(mySpd>=enSpd || Math.random()<0.6){ sfx('run'); await say('무사히 도망쳤다!'); return endBattle(); }
       await say('도망칠 수 없었다!');
       await turn({pass:true});
     }
@@ -574,7 +633,11 @@ async function turn(act){
     }
     return;
   }
-  if(act.ball) { const done = await throwBall(); if(done||!battle.on) return; }
+  if(act.ball) {
+    const done = await throwBall();
+    if(done===null) return;          // 던질 수 없었음 — 턴을 소비하지 않는다
+    if(done||!battle.on) return;
+  }
   if(act.potion){
     const key = act.potion, amount = key==='potion'?20:60;
     if(game.items[key]<=0){ await say('하나도 없다!'); return; }
@@ -599,7 +662,16 @@ async function turn(act){
 }
 async function enemyAttack(){
   const en = battle.enemy, me = activeMon();
-  const mv = en.moves[rnd(en.moves.length)];
+  let mv;
+  if(battle.trainer && Math.random()<0.6){
+    // 트레이너는 상성·위력이 좋은 기술을 고른다
+    const score = m => MOVES[m].power
+      * typeMul(MOVES[m].type, DEX[me.name].type)
+      * (MOVES[m].type===DEX[en.name].type ? 1.5 : 1);
+    mv = en.moves.reduce((b,m)=>score(m)>score(b)?m:b, en.moves[0]);
+  } else {
+    mv = en.moves[rnd(en.moves.length)];
+  }
   await doMove(en,me,mv,false);
 }
 async function doMove(user,target,move,isPlayer){
@@ -610,48 +682,102 @@ async function doMove(user,target,move,isPlayer){
   if(isPlayer) battle.shakeE=1; else battle.shakeP=1;
   const {dmg,mul,crit} = calcDamage(user,target,move);
   target.hp = Math.max(0, target.hp-dmg);
+  if(mul>1 || crit) battle.flash = Math.max(battle.flash,0.35);  // 강타 시 화면 섬광
   await wait(250);
+  await hpSettle();                  // HP바가 다 줄어든 뒤에 결과를 알린다
   if(crit) await say('급소에 맞았다!');
   if(mul>1) await say('효과가 굉장했다!');
   else if(mul<1) await say('효과가 별로인 듯하다…');
 }
-async function gainExp(faintedEnemy){
-  const me = activeMon();
-  let gain = Math.floor(DEX[faintedEnemy.name].exp * faintedEnemy.lvl / 5) + 1;
-  if(battle.trainer) gain = Math.floor(gain*1.5);
-  me.exp += gain;
-  await say(`${josa(me.name,'은는')} 경험치 ${josa(gain,'을를')} 얻었다!`);
-  while(me.exp >= expToNext(me.lvl+1)){
-    me.lvl++;
-    const grow = maxHpOf(DEX[me.name].hp,me.lvl) - me.maxhp;
-    me.maxhp += grow; me.hp = Math.min(me.maxhp, me.hp+grow);
+// HP바 애니메이션이 실제 수치를 따라잡을 때까지 잠깐 대기
+async function hpSettle(){
+  for(let i=0;i<90 && battle.on && battle.enemy;i++){
+    const me = activeMon(), en = battle.enemy;
+    if(Math.abs(battle.dispE-en.hp/en.maxhp)<.02 &&
+       Math.abs(battle.dispP-me.hp/me.maxhp)<.02) break;
+    await frame();
+  }
+}
+// 쓰러진 몬스터가 가라앉으며 사라지는 연출
+async function faintAnim(key){
+  const t0 = performance.now();
+  while(performance.now()-t0 < 450){
+    battle[key] = Math.min(1,(performance.now()-t0)/450);
+    await frame();
+  }
+  battle[key] = 1;
+}
+async function awardExp(mn, gain, announce){
+  mn.exp += gain;
+  if(announce) await say(`${josa(mn.name,'은는')} 경험치 ${josa(gain,'을를')} 얻었다!`);
+  while(mn.exp >= expToNext(mn.lvl+1)){
+    mn.lvl++;
+    const grow = maxHpOf(DEX[mn.name].hp,mn.lvl) - mn.maxhp;
+    mn.maxhp += grow; mn.hp = Math.min(mn.maxhp, mn.hp+grow);
     sfx('lvl');
-    await say(`${josa(me.name,'은는')} 레벨 ${josa(me.lvl,'이가')} 되었다!`);
-    for(const [l,mv] of DEX[me.name].learn){
-      if(l===me.lvl && !me.moves.includes(mv)){
-        if(me.moves.length>=4){
-          const old = me.moves.shift();
-          await say(`${josa(me.name,'은는')} ${josa(old,'을를')} 잊고…`);
+    await say(`${josa(mn.name,'은는')} 레벨 ${josa(mn.lvl,'이가')} 되었다!\n최대 HP ${mn.maxhp} (+${grow})`);
+    for(const [l,mv] of DEX[mn.name].learn){
+      if(l===mn.lvl && !mn.moves.includes(mv)){
+        if(mn.moves.length>=4){
+          const old = mn.moves.shift();
+          await say(`${josa(mn.name,'은는')} ${josa(old,'을를')} 잊고…`);
         }
-        me.moves.push(mv);
+        mn.moves.push(mv);
         await say(`${josa(mv,'을를')} 배웠다!`);
       }
     }
-    const ev = DEX[me.name].evolve;
-    if(ev && me.lvl>=ev.lv && !battle.evolveQueue.includes(me)) battle.evolveQueue.push(me);
+    const ev = DEX[mn.name].evolve;
+    if(ev && mn.lvl>=ev.lv && !battle.evolveQueue.includes(mn)) battle.evolveQueue.push(mn);
+  }
+}
+async function gainExp(faintedEnemy){
+  let gain = Math.floor(DEX[faintedEnemy.name].exp * faintedEnemy.lvl / 5) + 1;
+  if(battle.trainer) gain = Math.floor(gain*1.5);
+  await awardExp(activeMon(), gain, true);
+  // 벤치의 동료들도 경험치를 1/3씩 나눠 받는다 (쓰러진 멤버 제외)
+  const shared = Math.floor(gain/3);
+  if(shared>0){
+    for(let i=0;i<game.party.length;i++){
+      if(i===battle.meIdx || game.party[i].hp<=0) continue;
+      await awardExp(game.party[i], shared, false);
+    }
   }
 }
 async function enemyFainted(){
   const en = battle.enemy, tr = battle.trainer;
   sfx('faint');
+  await faintAnim('faintE');
   await say(`${tr?'상대 ':'야생 '}${josa(en.name,'은는')} 쓰러졌다!`);
+  if(!tr) playSong('victory');   // 야생전 승리 팡파르 (경험치 메시지 동안 재생)
   await gainExp(en);
   if(tr){
     battle.trIdx++;
     if(battle.trIdx < tr.party.length){
-      battle.enemy = makeMon(tr.party[battle.trIdx][0], tr.party[battle.trIdx][1]);
+      const next = makeMon(tr.party[battle.trIdx][0], tr.party[battle.trIdx][1]);
+      // 상대가 다음 몬스터를 내기 전에 교체 기회를 준다 (턴 소비 없음)
+      const hasOther = game.party.some((m,i)=>m.hp>0 && i!==battle.meIdx);
+      if(hasOther){
+        await say(`${josa(tr.name,'은는')} ${josa(next.name,'을를')}\n내보내려 한다.`);
+        const sw = await choose(['그대로 싸운다','교체한다'],{tag:'battle-moves',cancel:false,prompt:'몬스터를 교체할까?'});
+        if(sw===1){
+          while(true){
+            const opts = game.party.map((m,i)=>`${m.name} Lv${m.lvl} ${m.hp}/${m.maxhp}${i===battle.meIdx?' ◀':''}`);
+            const p = await choose(opts,{tag:'battle-moves'});
+            if(p<0 || p===battle.meIdx) break;   // 취소하면 그대로 싸운다
+            if(game.party[p].hp<=0){ await say('쓰러져 있어서 싸울 수 없다!'); continue; }
+            await say(`돌아와, ${activeMon().name}!`);
+            battle.meIdx = p;
+            battle.dispP = activeMon().hp/activeMon().maxhp;
+            battle.dispExp = expRatio(activeMon());
+            battle.faintP = 0;
+            await say(`가라! ${activeMon().name}!`);
+            break;
+          }
+        }
+      }
+      battle.enemy = next;
       dexSee(battle.enemy.name);
-      battle.dispE = 1;
+      battle.dispE = 1; battle.faintE = 0;
       await say(`${josa(tr.name,'은는')} ${josa(battle.enemy.name,'을를')} 내보냈다!`);
       return; // battleLoop 계속
     }
@@ -666,11 +792,11 @@ async function enemyFainted(){
     if(tr.champion) await endingSequence();
     return;
   }
-  playSong('victory');
   endBattle();
 }
 async function playerFainted(){
   sfx('faint');
+  await faintAnim('faintP');
   await say(`${josa(activeMon().name,'은는')} 쓰러졌다…`);
   const alive = game.party.map((m,i)=>i).filter(i=>game.party[i].hp>0);
   if(alive.length){
@@ -679,20 +805,22 @@ async function playerFainted(){
     battle.meIdx = alive[c];
     battle.dispP = activeMon().hp/activeMon().maxhp;
     battle.dispExp = expRatio(activeMon());
+    battle.faintP = 0;
     await say(`가라! ${activeMon().name}!`);
     return;
   }
   await say('노랑은 눈앞이 캄캄해졌다…');
   for(const m of game.party) m.hp = m.maxhp;
-  const half = Math.floor(game.money/2);
-  if(half>0){ game.money -= half; await say(`당황한 나머지 ${half}원을 떨어뜨렸다…`); }
+  // 패배는 따끔하되 회복 가능하게: 소지금 1/4 (최대 500원)
+  const loss = Math.min(500, Math.floor(game.money/4));
+  if(loss>0){ game.money -= loss; await say(`당황한 나머지 ${loss}원을 떨어뜨렸다…`); }
   endBattle();
   setMap('town',13,6,'down');
   saveGame();
 }
 async function throwBall(){
-  if(battle.trainer){ await say('남의 몬스터에게 볼을 던질 수는 없다!'); return false; }
-  if(game.items.ball<=0){ await say('몬스터볼이 없다!'); return false; }
+  if(battle.trainer){ await say('남의 몬스터에게 볼을 던질 수는 없다!'); return null; }
+  if(game.items.ball<=0){ await say('몬스터볼이 없다!'); return null; }
   game.items.ball--;
   const en = battle.enemy;
   sfx('ball');
@@ -708,12 +836,13 @@ async function throwBall(){
   await wait(350);
   if(shakes>=3){
     sfx('catch');
+    playSong('victory');
     en.hp = Math.max(1,en.hp);
     await say(`신난다! ${josa(en.name,'을를')} 잡았다!`);
     dexCaught(en.name);
+    await gainExp(en);   // 포획도 쓰러뜨린 것과 같은 경험치 (수집 → 성장 연결)
     if(game.party.length<6){ game.party.push(en); await say(`${josa(en.name,'이가')} 동료가 되었다!`); }
     else { game.box.push(en); await say(`파티가 가득 차 ${josa(en.name,'은는')}\n연구소 보관함으로 보내졌다.`); }
-    playSong('victory');
     endBattle();
     return true;
   }
@@ -743,7 +872,17 @@ async function evolveScene(mn){
   evolve.mon=mn; evolve.from=mn.name; evolve.to=ev.to; evolve.t=0;
   await say(`엇!? ${mn.name}의 모습이…!`);
   const t0 = performance.now();
-  while(performance.now()-t0 < 2600){ evolve.t=(performance.now()-t0)/2600; await frame(); }
+  let bReleased = !keys.B;   // 직전 대사를 닫은 B 홀드는 무시
+  while(performance.now()-t0 < 2600){
+    if(!keys.B) bReleased = true;
+    if(bReleased && keys.B){  // B로 진화 취소 (다음 레벨 업 때 다시 시도)
+      evolve.t = 0;
+      mode='world';
+      await say(`어라!? ${josa(mn.name,'이가')} 진화를 멈췄다!`);
+      return;
+    }
+    evolve.t=(performance.now()-t0)/2600; await frame();
+  }
   const oldName = mn.name, ratio = mn.hp/mn.maxhp;
   mn.name = ev.to;
   mn.maxhp = maxHpOf(DEX[mn.name].hp, mn.lvl);
@@ -782,7 +921,13 @@ async function titleMenu(){
   try{
     const has = !!localStorage.getItem(SAVE_KEY);
     if(has){
-      const c = await choose(['이어하기','새로운 모험'],{x:VW/2-70,y:190,w:140,cancel:false});
+      // 저장된 모험의 요약을 보여준다
+      let info = '';
+      try{
+        const s = JSON.parse(localStorage.getItem(SAVE_KEY));
+        if(s?.party?.length) info = `${MAPS[s.map]?.name||'?'} · ${s.party[0].name} Lv${s.party[0].lvl}`;
+      }catch(e){}
+      const c = await choose(['이어하기','새로운 모험'],{x:VW/2-85,y:184,w:170,cancel:false,prompt:info});
       if(c===0 && loadGame()){
         mode='world'; banner.text=curMap().name; banner.t=2;
         playSong(curMap().music);
@@ -809,8 +954,7 @@ async function newGame(){
   await say('박사: 너의 이름은… 그래, 「노랑」이구나!');
   await say('박사: 너만의 몬스터와 함께하는 모험이\n지금 시작된다! 연구소에서 기다리마!');
   mode='world';
-  setMap('town',13,6,'down');
-  playSong('field');
+  setMap('town',13,6,'down');   // setMap이 지역 BGM도 켠다
 }
 
 /* ================= 렌더링 ================= */
@@ -936,6 +1080,20 @@ function drawWorld(){
   if(walkFlip){ ctx.translate(Math.round(pxf*TILE-camX)+16, 0); ctx.scale(-1,1); ctx.drawImage(spr,0,Math.round(pyf*TILE-camY-3-bob),16,16); }
   else ctx.drawImage(spr, Math.round(pxf*TILE-camX), Math.round(pyf*TILE-camY-3-bob), 16,16);
   ctx.restore();
+  // 풀숲 위에 서 있으면 하반신이 풀에 가려진다
+  const grassTiles = [[game.px,game.py]];
+  if(game.moving) grassTiles.push([game.mx,game.my]);
+  if(game.party.length){
+    grassTiles.push([game.trail[0].x,game.trail[0].y]);
+    if(game.moving && game.trail[1]) grassTiles.push([game.trail[1].x,game.trail[1].y]);
+  }
+  for(const [gx,gy] of grassTiles){
+    if(tileAt(gx,gy)!=='w') continue;
+    const sx=gx*TILE-camX, sy=gy*TILE-camY;
+    ctx.fillStyle=C.tall; ctx.fillRect(sx,sy+10,16,6);
+    ctx.fillStyle=C.tallD;
+    for(let i=0;i<4;i++) ctx.fillRect(sx+1+i*4,sy+8,2,7);
+  }
   // 맵 이름 배너
   if(banner.t>0){
     const a = Math.min(1,banner.t);
@@ -951,16 +1109,16 @@ function drawWorld(){
     ctx.fillStyle=`rgba(255,255,240,${Math.min(0.85,healFx.t)})`;
     ctx.fillRect(0,0,VW,VH);
   }
+  // 맵 전환 페이드 인
+  if(fade.t>0){
+    ctx.fillStyle=`rgba(26,28,44,${Math.min(1,fade.t)})`;
+    ctx.fillRect(0,0,VW,VH);
+  }
   // 배틀 전환 효과
   if(battle.trans>0){
     ctx.fillStyle='#222034';
     const r = battle.trans*VW*0.75;
     ctx.beginPath(); ctx.arc(VW/2,VH/2,r,0,7); ctx.fill();
-  }
-  // 음소거 표시
-  if(!audio.on){
-    ctx.fillStyle='rgba(34,32,52,.7)'; ctx.fillRect(VW-26,VH-20,22,16);
-    ctx.fillStyle='#fffce8'; ctx.font='10px sans-serif'; ctx.fillText('♪✕', VW-23, VH-8);
   }
 }
 function hpColor(r){ return r>0.5?'#4fae4f':r>0.2?'#e8a020':'#e85a5a'; }
@@ -969,14 +1127,19 @@ function drawHPBar(x,y,w,ratio){
   ctx.fillStyle=hpColor(ratio); ctx.fillRect(x+1,y+1,Math.max(0,Math.round((w-2)*ratio)),4);
 }
 function drawBattle(){
-  ctx.fillStyle='#f0f8e8'; ctx.fillRect(0,0,VW,VH);
-  ctx.fillStyle='#d8e8c8'; ctx.fillRect(0,170,VW,36);
+  // 장소에 따라 배경 분위기가 달라진다 (스타디움은 모래빛)
+  const inStadium = game.map==='stadium';
+  ctx.fillStyle = inStadium ? '#f6eed8' : '#f0f8e8'; ctx.fillRect(0,0,VW,VH);
+  ctx.fillStyle = inStadium ? '#e4d6ae' : '#d8e8c8'; ctx.fillRect(0,170,VW,36);
   const en = battle.enemy, me = activeMon();
+  // 배틀 시작 시 양쪽에서 미끄러져 들어오는 등장 연출
+  const intro = 1-Math.pow(1-battle.introT,3);
+  const slideE = (1-intro)*140, slideP = (1-intro)*-160;
   if(en){
     // 적
     const shE = battle.shakeE>0?Math.sin(battle.shakeE*40)*3:0;
     const lgE = battle.lungeE>0?Math.sin(battle.lungeE*Math.PI)*-8:0;
-    ctx.fillStyle='#c8d8b0'; ctx.beginPath(); ctx.ellipse(232,108,46,12,0,0,7); ctx.fill();
+    ctx.fillStyle='#c8d8b0'; ctx.beginPath(); ctx.ellipse(232+slideE,108,46,12,0,0,7); ctx.fill();
     if(battle.ballAnim){
       // 포획 중: 몬스터볼이 흔들린다
       const ang = Math.sin(clock*22)*battle.ballAnim.rock*0.5;
@@ -987,8 +1150,10 @@ function drawBattle(){
       ctx.beginPath(); ctx.arc(0,0,4.5,0,7); ctx.fill();
       ctx.fillStyle='#f8f8f8'; ctx.beginPath(); ctx.arc(0,0,2.5,0,7); ctx.fill();
       ctx.restore();
-    } else {
-      ctx.drawImage(SPR[en.name],0,0,16,16, 200+shE+lgE, 48, 64,64);
+    } else if(battle.faintE<1){
+      ctx.save(); ctx.globalAlpha = 1-battle.faintE;
+      ctx.drawImage(SPR[en.name],0,0,16,16, 200+shE+lgE+slideE, 48+battle.faintE*32, 64,64);
+      ctx.restore();
     }
     panel(12,12,148,46);
     ctx.fillStyle='#222034'; ctx.font='bold 12px sans-serif';
@@ -1001,16 +1166,29 @@ function drawBattle(){
     // 아군
     const shP = battle.shakeP>0?Math.sin(battle.shakeP*40)*3:0;
     const lgP = battle.lungeP>0?Math.sin(battle.lungeP*Math.PI)*8:0;
-    ctx.fillStyle='#c8d8b0'; ctx.beginPath(); ctx.ellipse(80,196,50,12,0,0,7); ctx.fill();
-    ctx.save(); ctx.translate(116+shP+lgP,128); ctx.scale(-1,1);
-    ctx.drawImage(SPR[me.name],0,0,16,16,-36,0,72,72);
-    ctx.restore();
+    ctx.fillStyle='#c8d8b0'; ctx.beginPath(); ctx.ellipse(80+slideP,196,50,12,0,0,7); ctx.fill();
+    if(battle.faintP<1){
+      ctx.save(); ctx.globalAlpha = 1-battle.faintP;
+      ctx.translate(116+shP+lgP+slideP,128+battle.faintP*32); ctx.scale(-1,1);
+      ctx.drawImage(SPR[me.name],0,0,16,16,-36,0,72,72);
+      ctx.restore();
+    }
     panel(164,134,148,62);
     ctx.fillStyle='#222034'; ctx.font='bold 12px sans-serif';
     ctx.fillText(`${me.name}  Lv${me.lvl}`, 172, 150);
     drawHPBar(172,156,124,battle.dispP);
+    // 저체력 경고: HP바가 깜빡인다
+    if(battle.dispP>0 && battle.dispP<0.25){
+      ctx.globalAlpha = 0.25+0.25*Math.sin(clock*9);
+      ctx.fillStyle='#fffce8';
+      ctx.fillRect(173,157,Math.max(1,Math.round(122*battle.dispP)),4);
+      ctx.globalAlpha = 1;
+    }
     ctx.font='11px sans-serif';
-    ctx.fillText(`${me.hp} / ${me.maxhp}`, 172, 174);
+    // HP 숫자도 바와 함께 줄어드는 애니메이션
+    const shownHp = Math.abs(battle.dispP - me.hp/me.maxhp)<.01
+      ? me.hp : Math.max(0,Math.round(battle.dispP*me.maxhp));
+    ctx.fillText(`${shownHp} / ${me.maxhp}`, 172, 174);
     // EXP 바
     ctx.fillStyle='#222034'; ctx.fillRect(172,180,124,4);
     ctx.fillStyle='#4a90e8'; ctx.fillRect(173,181,Math.round(122*battle.dispExp),2);
@@ -1041,7 +1219,13 @@ function drawBattle(){
     const mv = MOVES[sel];
     if(mv){
       ctx.font='11px sans-serif';
-      ctx.fillText(`타입:${TYPE_KO[mv.type]}  위력:${mv.power}`, 196, 282);
+      let info = `타입:${TYPE_KO[mv.type]}  위력:${mv.power}`;
+      if(battle.enemy){
+        const mul = typeMul(mv.type, DEX[battle.enemy.name].type);
+        if(mul>1) info += '  ▲굉장';
+        else if(mul<1) info += '  ▽별로';
+      }
+      ctx.fillText(info, 178, 282);
     }
   }
   if(battle.flash>0){ ctx.fillStyle=`rgba(255,255,255,${battle.flash})`; ctx.fillRect(0,0,VW,VH); }
@@ -1165,11 +1349,13 @@ function loop(now){
   clock += dt;
   banner.t = Math.max(0,banner.t-dt);
   alert_.t = Math.max(0,alert_.t-dt);
+  fade.t = Math.max(0,fade.t-dt*3);
   battle.shakeE = Math.max(0,battle.shakeE-dt*3);
   battle.shakeP = Math.max(0,battle.shakeP-dt*3);
   battle.lungeE = Math.max(0,battle.lungeE-dt*4);
   battle.lungeP = Math.max(0,battle.lungeP-dt*4);
   battle.flash = Math.max(0,battle.flash-dt*2);
+  if(battle.on) battle.introT = Math.min(1,battle.introT+dt*2.2);
   if(battle.ballAnim) battle.ballAnim.rock = Math.max(0,battle.ballAnim.rock-dt*2.2);
   healFx.t = Math.max(0,healFx.t-dt*1.2);
   // HP/EXP 바 애니메이션
@@ -1191,6 +1377,11 @@ function loop(now){
   }
   drawChooser();
   drawDialogBox();
+  // 음소거 표시 (모든 화면 공통, 우상단)
+  if(!audio.on){
+    ctx.fillStyle='rgba(34,32,52,.7)'; ctx.fillRect(VW-26,4,22,16);
+    ctx.fillStyle='#fffce8'; ctx.font='10px sans-serif'; ctx.fillText('♪✕', VW-23, 16);
+  }
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
@@ -1198,5 +1389,5 @@ requestAnimationFrame(loop);
 setInterval(()=>{ if(performance.now()-last>200) loop(performance.now()); }, 100);
 
 /* 디버그 핸들 */
-window.DBG = {game, battle, dialog, get chooser(){return chooser;}, get mode(){return mode;}, set mode(v){mode=v;},
+window.DBG = {game, battle, dialog, keys, get chooser(){return chooser;}, get mode(){return mode;}, set mode(v){mode=v;},
   makeMon, startBattle, setMap, saveGame, loadGame, newGame, handleKey, evolveScene, MAPS, DEX, audio};
